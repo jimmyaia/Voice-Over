@@ -80,6 +80,28 @@ export async function POST(request: Request) {
       return Response.json({ translation });
     }
 
+    if (body.action === "apply_suggestions") {
+      if (!validText(body.german)) return Response.json({ error: "The approved German script is required." }, { status: 400 });
+      if (!validText(body.direction, 600)) return Response.json({ error: "The current delivery direction is required." }, { status: 400 });
+      if (!Array.isArray(body.suggestions) || body.suggestions.length < 1 || body.suggestions.length > 4 || body.suggestions.some((item: unknown) => !validText(item, 300))) {
+        return Response.json({ error: "Select between one and four valid suggestions." }, { status: 400 });
+      }
+      const result = await fetch("https://api.openai.com/v1/responses", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-4.1-mini",
+          instructions: "Rewrite voice-delivery instructions for a German training narration. Incorporate every selected recommendation as a precise, actionable direction for the text-to-speech model. Preserve useful existing instructions. Do not rewrite, quote, translate, or change the approved German script. Return only the revised delivery instructions as plain text, no heading or markdown. Maximum 500 characters.",
+          input: `Approved German script (reference only):\n${body.german}\n\nCurrent delivery instructions:\n${body.direction}\n\nSelected recommendations:\n- ${body.suggestions.join("\n- ")}`
+        })
+      });
+      const data = await result.json() as any;
+      if (!result.ok) return Response.json({ error: safeApiError(result.status) }, { status: result.status === 429 ? 429 : 502 });
+      const revisedDirection = outputText(data).trim().slice(0, 600);
+      if (!revisedDirection) return Response.json({ error: "OpenAI returned empty delivery instructions." }, { status: 502 });
+      return Response.json({ direction: revisedDirection });
+    }
+
     if (body.action === "generate") {
       if (!validText(body.german)) return Response.json({ error: `Add an approved German script of ${MAX_SCRIPT_LENGTH} characters or fewer.` }, { status: 400 });
       if (body.english !== undefined && !validText(body.english)) return Response.json({ error: "The English source script is invalid." }, { status: 400 });
