@@ -1,5 +1,7 @@
 # Secure Voice Production Studio
 
+Stable checkpoint: **v1.7**
+
 This is the real API-powered demo. It translates an English training script into German, generates an OpenAI MP3, transcribes the result, compares the spoken output with the approved German script, and provides an AI-assisted naturalness review.
 
 ## Deploy to Vercel
