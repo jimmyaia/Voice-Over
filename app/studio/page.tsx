@@ -1,9 +1,12 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 import {
   AudioLines,
   Check,
+  CheckCircle2,
   ChevronRight,
   Download,
   FileAudio,
@@ -15,6 +18,7 @@ import {
   Sparkles,
   Trash2,
   Volume2,
+  ArrowLeft,
 } from "lucide-react";
 
 const SAMPLE_ENGLISH =
@@ -57,6 +61,14 @@ const directionPresets = [
 const voiceOptions = ["marin", "cedar", "coral", "nova"];
 
 export default function VoiceStudioPage() {
+  const router = useRouter();
+  const supabase = useMemo(() => createClient(), []);
+  const [projectId, setProjectId] = useState("");
+  const [clipId, setClipId] = useState("");
+  const [organizationId, setOrganizationId] = useState("");
+  const [clipSequence, setClipSequence] = useState(0);
+  const [clipLabel, setClipLabel] = useState("Data Security Introduction");
+  const [approved, setApproved] = useState(false);
   const [english, setEnglish] = useState(SAMPLE_ENGLISH);
   const [german, setGerman] = useState(SAMPLE_GERMAN);
   const [stage, setStage] = useState<Stage>("script");
@@ -69,7 +81,7 @@ export default function VoiceStudioPage() {
   );
   const [audioUrl, setAudioUrl] = useState("");
   const [qc, setQc] = useState<QcResult | null>(null);
-  const [busy, setBusy] = useState<"translate" | "generate" | "apply" | null>(
+  const [busy, setBusy] = useState<"translate" | "generate" | "apply" | "approve" | null>(
     null,
   );
   const [error, setError] = useState("");
@@ -87,6 +99,72 @@ export default function VoiceStudioPage() {
     () => german.trim().split(/\s+/).filter(Boolean).length,
     [german],
   );
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedProject = params.get("project") || "";
+    const requestedClip = params.get("clip") || "";
+    setProjectId(requestedProject);
+    setClipId(requestedClip);
+    if (requestedProject && requestedClip) void loadClip(requestedProject, requestedClip);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function loadClip(requestedProject: string, requestedClip: string) {
+    setError("");
+    const { data: project, error: projectError } = await supabase.from("projects").select("organization_id").eq("id", requestedProject).single();
+    const { data: clip, error: clipError } = await supabase.from("clips").select("sequence,label,english_source,german_target,custom_direction,status").eq("id", requestedClip).eq("project_id", requestedProject).single();
+    if (projectError || clipError || !project || !clip) {
+      setError(projectError?.message || clipError?.message || "Clip could not be loaded.");
+      return;
+    }
+    setOrganizationId(project.organization_id);
+    setClipSequence(clip.sequence);
+    setClipLabel(clip.label);
+    setEnglish(clip.english_source);
+    setGerman(clip.german_target);
+    if (clip.custom_direction) setDirection(clip.custom_direction);
+    setApproved(clip.status === "approved");
+  }
+
+  async function approveAudio(openNext: boolean) {
+    if (!projectId || !clipId || !organizationId || !audioUrl || !qc) {
+      setError("Generate and review the clip before approving it.");
+      return;
+    }
+    setBusy("approve");
+    setError("");
+    try {
+      const { data: userData } = await supabase.auth.getUser();
+      const userId = userData.user?.id;
+      if (!userId) throw new Error("Your session expired. Please sign in again.");
+      const { data: latest } = await supabase.from("audio_versions").select("version_number").eq("clip_id", clipId).order("version_number", { ascending: false }).limit(1).maybeSingle();
+      const versionNumber = (latest?.version_number || 0) + 1;
+      const blob = await fetch(audioUrl).then((response) => response.blob());
+      const storagePath = `${organizationId}/${projectId}/clips/${clipId}/v${versionNumber}.mp3`;
+      const { error: uploadError } = await supabase.storage.from("voice-audio").upload(storagePath, blob, { contentType: "audio/mpeg", upsert: false });
+      if (uploadError) throw uploadError;
+      const { data: audioVersion, error: versionError } = await supabase.from("audio_versions").insert({ clip_id: clipId, version_number: versionNumber, script_version: 1, storage_path: storagePath, mime_type: "audio/mpeg", byte_size: blob.size, duration_seconds: duration || null, voice, tone, speed, energy, direction, qc_status: qc.status, qc_score: qc.score, transcript: qc.transcript || null, created_by: userId }).select("id").single();
+      if (versionError || !audioVersion) throw versionError || new Error("Audio version was not saved.");
+      const { error: clipError } = await supabase.from("clips").update({ status: "approved", current_audio_version_id: audioVersion.id, approved_audio_version_id: audioVersion.id, custom_direction: direction, updated_at: new Date().toISOString() }).eq("id", clipId);
+      if (clipError) throw clipError;
+      const { error: approvalError } = await supabase.from("clip_approvals").insert({ clip_id: clipId, audio_version_id: audioVersion.id, decision: "approved", decided_by: userId });
+      if (approvalError) throw approvalError;
+      setApproved(true);
+      if (openNext) {
+        const { data: nextClip } = await supabase.from("clips").select("id").eq("project_id", projectId).gt("sequence", clipSequence).neq("status", "approved").order("sequence").limit(1).maybeSingle();
+        if (nextClip) {
+          router.push(`/studio?project=${projectId}&clip=${nextClip.id}`);
+          return;
+        }
+      }
+      router.push(`/projects/${projectId}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The audio could not be approved.");
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function translate() {
     setBusy("translate");
@@ -288,7 +366,7 @@ export default function VoiceStudioPage() {
                   Clip 01 · Version {Math.max(version, 1)}
                 </p>
                 <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-                  Data Security Introduction
+                  {clipLabel}
                 </h1>
               </div>
               <div className="flex rounded-xl border border-white/10 bg-white/[.035] p-1 text-xs">
@@ -551,6 +629,21 @@ export default function VoiceStudioPage() {
                           }
                         />
                       )}{" "}
+                      {audioUrl && qc && (
+                        <div className="mt-5 rounded-2xl border border-[#80f0bd]/25 bg-[#80f0bd]/8 p-4">
+                          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                              <p className="font-semibold text-[#b9f8da]">{approved ? "This clip is approved" : "Ready to finalize"}</p>
+                              <p className="mt-1 text-xs text-[#789187]">Approval saves the MP3 to the project and adds its link to the dashboard.</p>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {projectId && <button type="button" className="secondary-btn" onClick={() => router.push(`/projects/${projectId}`)}><ArrowLeft size={16}/> Back to project</button>}
+                              {!approved && <button type="button" className="secondary-btn" disabled={!!busy} onClick={() => void approveAudio(false)}>{busy === "approve" ? <LoaderCircle className="animate-spin" size={16}/> : <CheckCircle2 size={16}/>} Approve & save</button>}
+                              {!approved && <button type="button" className="primary-btn" disabled={!!busy} onClick={() => void approveAudio(true)}>{busy === "approve" ? <LoaderCircle className="animate-spin" size={16}/> : <ChevronRight size={16}/>} Approve & next clip</button>}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                   {qc?.humanReview && (
