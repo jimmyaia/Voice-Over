@@ -14,7 +14,7 @@ const securityHeaders = [
       "media-src 'self' data: blob:",
       "script-src 'self' 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline'",
-      "connect-src 'self'",
+     "connect-src 'self' https://hbvoytyisnxdpqbgbbzw.supabase.co wss://hbvoytyisnxdpqbgbbzw.supabase.co",
     ].join("; "),
   },
 ];
