@@ -16,6 +16,7 @@ type ApprovalBody = {
   energy?: number;
   direction?: string;
   qc?: { status?: string; score?: number; transcript?: string };
+  versionNumber?: number;
   openNext?: boolean;
 };
 
@@ -71,7 +72,10 @@ export async function POST(request: Request) {
       .maybeSingle();
     if (latestError) throw new Error(`Version check failed: ${latestError.message}`);
 
-    const versionNumber = (latest?.version_number || 0) + 1;
+    const requestedVersion = Number.isInteger(body.versionNumber) && (body.versionNumber || 0) > 0
+      ? body.versionNumber as number
+      : 1;
+    const versionNumber = Math.max((latest?.version_number || 0) + 1, requestedVersion);
     const storagePath = `${organizationId}/${projectId}/clips/${clipId}/v${versionNumber}.mp3`;
     const { error: uploadError } = await supabase.storage
       .from("voice-audio")

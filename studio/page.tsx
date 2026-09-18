@@ -132,7 +132,7 @@ export default function VoiceStudioPage() {
   async function loadClip(requestedProject: string, requestedClip: string) {
     setError("");
     const { data: project, error: projectError } = await supabase.from("projects").select("organization_id").eq("id", requestedProject).single();
-    const { data: clip, error: clipError } = await supabase.from("clips").select("sequence,label,english_source,german_target,custom_direction,status").eq("id", requestedClip).eq("project_id", requestedProject).single();
+    const { data: clip, error: clipError } = await supabase.from("clips").select("sequence,label,english_source,german_target,custom_direction,status,current_audio_version_id").eq("id", requestedClip).eq("project_id", requestedProject).single();
     if (projectError || clipError || !project || !clip) {
       setError(projectError?.message || clipError?.message || "Clip could not be loaded.");
       return;
@@ -144,6 +144,39 @@ export default function VoiceStudioPage() {
     setGerman(clip.german_target);
     if (clip.custom_direction) setDirection(clip.custom_direction);
     setApproved(clip.status === "approved");
+    if (clip.current_audio_version_id) {
+      const { data: savedAudio, error: audioError } = await supabase
+        .from("audio_versions")
+        .select("version_number,storage_path,duration_seconds,voice,tone,speed,energy,direction,qc_status,qc_score,transcript")
+        .eq("id", clip.current_audio_version_id)
+        .single();
+      if (audioError || !savedAudio) {
+        setError(audioError?.message || "The saved audio version could not be loaded.");
+        return;
+      }
+      const { data: signedAudio, error: signedAudioError } = await supabase.storage
+        .from("voice-audio")
+        .createSignedUrl(savedAudio.storage_path, 3600);
+      if (signedAudioError || !signedAudio?.signedUrl) {
+        setError(signedAudioError?.message || "The saved MP3 link could not be created.");
+        return;
+      }
+      setAudioUrl(signedAudio.signedUrl);
+      setVersion(savedAudio.version_number);
+      setDuration(Number(savedAudio.duration_seconds) || 0);
+      if (savedAudio.voice) setVoice(savedAudio.voice);
+      if (savedAudio.tone) setTone(savedAudio.tone);
+      if (savedAudio.speed !== null) setSpeed(savedAudio.speed);
+      if (savedAudio.energy !== null) setEnergy(savedAudio.energy);
+      if (savedAudio.direction) setDirection(savedAudio.direction);
+      setQc({
+        score: savedAudio.qc_score ?? 0,
+        status: savedAudio.qc_status || "warning",
+        transcript: savedAudio.transcript || "",
+        checks: [],
+      });
+      setStage("qc");
+    }
   }
 
   async function approveAudio(openNext: boolean) {
@@ -183,6 +216,7 @@ export default function VoiceStudioPage() {
             energy,
             direction,
             qc,
+            versionNumber: Math.max(version, 1),
             openNext,
           }),
         }),
