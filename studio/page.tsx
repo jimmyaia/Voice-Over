@@ -377,7 +377,7 @@ export default function VoiceStudioPage() {
     <main className="min-h-screen bg-[#07110e] text-[#eef8f3]">
       <header className="border-b border-white/10 bg-[#091713]/90 px-5 py-4 backdrop-blur md:px-8">
         <div className="mx-auto flex max-w-[1440px] items-center justify-between">
-          <div className="flex items-center gap-3">
+          <a href="/" aria-label="Voice Production Studio — all projects" className="flex items-center gap-3 rounded-xl focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#80f0bd]">
             <span className="grid h-10 w-10 place-items-center rounded-xl bg-[#80f0bd] text-[#07110e]">
               <AudioLines size={22} strokeWidth={2.4} />
             </span>
@@ -389,11 +389,12 @@ export default function VoiceStudioPage() {
                 Client demo · German training audio
               </p>
             </div>
-          </div>
-          <div className="hidden items-center gap-2 rounded-full border border-[#80f0bd]/20 bg-[#80f0bd]/8 px-3 py-1.5 text-xs text-[#a6f5cf] sm:flex">
-            <span className="h-1.5 w-1.5 rounded-full bg-[#80f0bd]" />
-            Secure API project
-          </div>
+          </a>
+          {projectId && (
+            <a href={`/projects/${projectId}`} className="secondary-btn">
+              <ArrowLeft size={16} /> Back to Project
+            </a>
+          )}
         </div>
       </header>
       <div className="mx-auto grid max-w-[1440px] lg:grid-cols-[220px_minmax(0,1fr)]">
