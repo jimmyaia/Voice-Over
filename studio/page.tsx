@@ -53,18 +53,6 @@ type TimedFeedback = {
 };
 type ApprovalTarget = "save" | "next" | null;
 
-function audioDataUrlToBlob(dataUrl: string) {
-  const match = dataUrl.match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/);
-  if (!match) throw new Error("The generated audio is no longer available. Please generate it again.");
-
-  const mimeType = match[1] || "audio/mpeg";
-  const bytes = match[2]
-    ? Uint8Array.from(atob(match[3]), (character) => character.charCodeAt(0))
-    : new TextEncoder().encode(decodeURIComponent(match[3]));
-
-  return new Blob([bytes], { type: mimeType });
-}
-
 async function withTimeout<T>(operation: PromiseLike<T>, label: string, milliseconds = 20000) {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -165,91 +153,56 @@ export default function VoiceStudioPage() {
     }
     setBusy("approve");
     setApprovalTarget(openNext ? "next" : "save");
-    setApprovalStep("Preparing MP3…");
+    setApprovalStep("Saving MP3…");
     setError("");
-    let uploadedStoragePath = "";
     try {
-      const { data: userData, error: userError } = await withTimeout(
-        supabase.auth.getUser(),
-        "Checking your session",
-      );
-      if (userError) throw userError;
-      const userId = userData.user?.id;
-      if (!userId) throw new Error("Your session expired. Please sign in again.");
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+      if (sessionError || !accessToken) throw new Error("Your session expired. Please sign in again.");
 
-      setApprovalStep("Checking version number…");
-      const { data: latest, error: latestError } = await withTimeout(
-        supabase.from("audio_versions").select("version_number").eq("clip_id", clipId).order("version_number", { ascending: false }).limit(1).maybeSingle(),
-        "Checking the latest version",
-      );
-      if (latestError) throw latestError;
-      const versionNumber = (latest?.version_number || 0) + 1;
-      const blob = audioDataUrlToBlob(audioUrl);
-      const storagePath = `${organizationId}/${projectId}/clips/${clipId}/v${versionNumber}.mp3`;
+      const match = audioUrl.match(/^data:([^;,]+)?;base64,([\s\S]*)$/);
+      if (!match) throw new Error("The generated audio is no longer available. Please generate it again.");
 
-      setApprovalStep("Uploading MP3…");
-      const { error: uploadError } = await withTimeout(
-        supabase.storage.from("voice-audio").upload(storagePath, blob, { contentType: blob.type || "audio/mpeg", upsert: false }),
-        "Uploading the MP3",
-        45000,
+      const response = await withTimeout(
+        fetch("/api/audio/approve", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            projectId,
+            clipId,
+            organizationId,
+            audioBase64: match[2],
+            mimeType: match[1] || "audio/mpeg",
+            duration: duration || null,
+            voice,
+            tone,
+            speed,
+            energy,
+            direction,
+            qc,
+            openNext,
+          }),
+        }),
+        "Saving the approved MP3",
+        60000,
       );
-      if (uploadError) throw uploadError;
-      uploadedStoragePath = storagePath;
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "The server could not save the approved MP3.");
 
-      setApprovalStep("Saving version and QC…");
-      const { data: audioVersion, error: versionError } = await withTimeout(
-        supabase.from("audio_versions").insert({ clip_id: clipId, version_number: versionNumber, script_version: 1, storage_path: storagePath, mime_type: blob.type || "audio/mpeg", byte_size: blob.size, duration_seconds: duration || null, voice, tone, speed, energy, direction, qc_status: qc.status, qc_score: qc.score, transcript: qc.transcript || null, created_by: userId }).select("id").single(),
-        "Saving the audio version",
-      );
-      if (versionError || !audioVersion) throw versionError || new Error("Audio version was not saved.");
-
-      setApprovalStep("Marking clip approved…");
-      const { error: clipError } = await withTimeout(
-        supabase.from("clips").update({ status: "approved", current_audio_version_id: audioVersion.id, approved_audio_version_id: audioVersion.id, custom_direction: direction, updated_at: new Date().toISOString() }).eq("id", clipId),
-        "Approving the clip",
-      );
-      if (clipError) throw clipError;
-
-      const { error: approvalError } = await withTimeout(
-        supabase.from("clip_approvals").insert({ clip_id: clipId, audio_version_id: audioVersion.id, decision: "approved", decided_by: userId }),
-        "Saving the approval record",
-      );
-      if (approvalError) throw approvalError;
-
-      const { data: savedClip, error: verifyError } = await withTimeout(
-        supabase.from("clips").select("status,current_audio_version_id,approved_audio_version_id").eq("id", clipId).single(),
-        "Verifying the saved clip",
-      );
-      if (verifyError || savedClip?.status !== "approved" || savedClip.current_audio_version_id !== audioVersion.id) {
-        throw verifyError || new Error("The save could not be verified. Please try again.");
-      }
-
-      setVersion(versionNumber);
+      setVersion(result.versionNumber);
       setApproved(true);
       setApprovalStep("Approved and saved.");
-      if (openNext) {
-        const { data: nextClip } = await supabase.from("clips").select("id").eq("project_id", projectId).gt("sequence", clipSequence).neq("status", "approved").order("sequence").limit(1).maybeSingle();
-        if (nextClip) {
-          router.push(`/studio?project=${projectId}&clip=${nextClip.id}`);
-          return;
-        }
+      if (openNext && result.nextClipId) {
+        router.push(`/studio?project=${projectId}&clip=${result.nextClipId}`);
+        return;
       }
       router.push(`/projects/${projectId}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : "The audio could not be approved.";
-      const lowerMessage = message.toLowerCase();
-      const help = lowerMessage.includes("bucket")
-        ? " The private Supabase Storage bucket named voice-audio is missing."
-        : lowerMessage.includes("row-level security") || lowerMessage.includes("policy")
-          ? " Supabase storage/database permissions need to be applied."
-          : "";
-      setError(`${approvalStep || "Approval"} failed: ${message}.${help}`.replace("..", "."));
-
-      // If the upload succeeded but the database write did not, remove the orphaned
-      // file so the same version can be retried without a duplicate-path error.
-      if (uploadedStoragePath) {
-        await supabase.storage.from("voice-audio").remove([uploadedStoragePath]);
-      }
+      setError(`Approval failed: ${message}`);
     } finally {
       setBusy(null);
       setApprovalTarget(null);
@@ -733,6 +686,11 @@ export default function VoiceStudioPage() {
                               {!approved && <button type="button" className="primary-btn" disabled={!!busy} onClick={() => void approveAudio(true)}>{approvalTarget === "next" ? <LoaderCircle className="animate-spin" size={16}/> : <ChevronRight size={16}/>} {approvalTarget === "next" ? approvalStep || "Saving…" : "Approve & next clip"}</button>}
                             </div>
                           </div>
+                          {error && (
+                            <div role="alert" className="mt-3 rounded-xl border border-red-400/25 bg-red-400/10 px-4 py-3 text-sm text-red-200">
+                              {error}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -807,7 +765,7 @@ export default function VoiceStudioPage() {
                 </div>
               </div>
             )}
-            {error && (
+            {error && !(stage === "qc" && audioUrl && qc) && (
               <div
                 role="alert"
                 className="mt-5 rounded-xl border border-red-400/25 bg-red-400/10 px-4 py-3 text-sm text-red-200"
