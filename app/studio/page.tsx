@@ -51,6 +51,23 @@ type TimedFeedback = {
   category: string;
   comment: string;
 };
+type ApprovalTarget = "save" | "next" | null;
+
+async function withTimeout<T>(operation: PromiseLike<T>, label: string, milliseconds = 20000) {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`${label} timed out. Please try again.`)),
+      milliseconds,
+    );
+  });
+
+  try {
+    return await Promise.race([Promise.resolve(operation), timeout]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
 const directionPresets = [
   "Professional",
   "Warm",
@@ -85,6 +102,8 @@ export default function VoiceStudioPage() {
     null,
   );
   const [error, setError] = useState("");
+  const [approvalTarget, setApprovalTarget] = useState<ApprovalTarget>(null);
+  const [approvalStep, setApprovalStep] = useState("");
   const [version, setVersion] = useState(0);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [duration, setDuration] = useState(0);
@@ -133,36 +152,61 @@ export default function VoiceStudioPage() {
       return;
     }
     setBusy("approve");
+    setApprovalTarget(openNext ? "next" : "save");
+    setApprovalStep("Saving MP3…");
     setError("");
     try {
-      const { data: userData } = await supabase.auth.getUser();
-      const userId = userData.user?.id;
-      if (!userId) throw new Error("Your session expired. Please sign in again.");
-      const { data: latest } = await supabase.from("audio_versions").select("version_number").eq("clip_id", clipId).order("version_number", { ascending: false }).limit(1).maybeSingle();
-      const versionNumber = (latest?.version_number || 0) + 1;
-      const blob = await fetch(audioUrl).then((response) => response.blob());
-      const storagePath = `${organizationId}/${projectId}/clips/${clipId}/v${versionNumber}.mp3`;
-      const { error: uploadError } = await supabase.storage.from("voice-audio").upload(storagePath, blob, { contentType: "audio/mpeg", upsert: false });
-      if (uploadError) throw uploadError;
-      const { data: audioVersion, error: versionError } = await supabase.from("audio_versions").insert({ clip_id: clipId, version_number: versionNumber, script_version: 1, storage_path: storagePath, mime_type: "audio/mpeg", byte_size: blob.size, duration_seconds: duration || null, voice, tone, speed, energy, direction, qc_status: qc.status, qc_score: qc.score, transcript: qc.transcript || null, created_by: userId }).select("id").single();
-      if (versionError || !audioVersion) throw versionError || new Error("Audio version was not saved.");
-      const { error: clipError } = await supabase.from("clips").update({ status: "approved", current_audio_version_id: audioVersion.id, approved_audio_version_id: audioVersion.id, custom_direction: direction, updated_at: new Date().toISOString() }).eq("id", clipId);
-      if (clipError) throw clipError;
-      const { error: approvalError } = await supabase.from("clip_approvals").insert({ clip_id: clipId, audio_version_id: audioVersion.id, decision: "approved", decided_by: userId });
-      if (approvalError) throw approvalError;
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+      if (sessionError || !accessToken) throw new Error("Your session expired. Please sign in again.");
+
+      const match = audioUrl.match(/^data:([^;,]+)?;base64,([\s\S]*)$/);
+      if (!match) throw new Error("The generated audio is no longer available. Please generate it again.");
+
+      const response = await withTimeout(
+        fetch("/api/audio/approve", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            projectId,
+            clipId,
+            organizationId,
+            audioBase64: match[2],
+            mimeType: match[1] || "audio/mpeg",
+            duration: duration || null,
+            voice,
+            tone,
+            speed,
+            energy,
+            direction,
+            qc,
+            openNext,
+          }),
+        }),
+        "Saving the approved MP3",
+        60000,
+      );
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "The server could not save the approved MP3.");
+
+      setVersion(result.versionNumber);
       setApproved(true);
-      if (openNext) {
-        const { data: nextClip } = await supabase.from("clips").select("id").eq("project_id", projectId).gt("sequence", clipSequence).neq("status", "approved").order("sequence").limit(1).maybeSingle();
-        if (nextClip) {
-          router.push(`/studio?project=${projectId}&clip=${nextClip.id}`);
-          return;
-        }
+      setApprovalStep("Approved and saved.");
+      if (openNext && result.nextClipId) {
+        router.push(`/studio?project=${projectId}&clip=${result.nextClipId}`);
+        return;
       }
       router.push(`/projects/${projectId}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "The audio could not be approved.");
+      const message = err instanceof Error ? err.message : "The audio could not be approved.";
+      setError(`Approval failed: ${message}`);
     } finally {
       setBusy(null);
+      setApprovalTarget(null);
+      setApprovalStep("");
     }
   }
 
@@ -638,10 +682,15 @@ export default function VoiceStudioPage() {
                             </div>
                             <div className="flex flex-wrap gap-2">
                               {projectId && <button type="button" className="secondary-btn" onClick={() => router.push(`/projects/${projectId}`)}><ArrowLeft size={16}/> Back to project</button>}
-                              {!approved && <button type="button" className="secondary-btn" disabled={!!busy} onClick={() => void approveAudio(false)}>{busy === "approve" ? <LoaderCircle className="animate-spin" size={16}/> : <CheckCircle2 size={16}/>} Approve & save</button>}
-                              {!approved && <button type="button" className="primary-btn" disabled={!!busy} onClick={() => void approveAudio(true)}>{busy === "approve" ? <LoaderCircle className="animate-spin" size={16}/> : <ChevronRight size={16}/>} Approve & next clip</button>}
+                              {!approved && <button type="button" className="secondary-btn" disabled={!!busy} onClick={() => void approveAudio(false)}>{approvalTarget === "save" ? <LoaderCircle className="animate-spin" size={16}/> : <CheckCircle2 size={16}/>} {approvalTarget === "save" ? approvalStep || "Saving…" : "Approve & save"}</button>}
+                              {!approved && <button type="button" className="primary-btn" disabled={!!busy} onClick={() => void approveAudio(true)}>{approvalTarget === "next" ? <LoaderCircle className="animate-spin" size={16}/> : <ChevronRight size={16}/>} {approvalTarget === "next" ? approvalStep || "Saving…" : "Approve & next clip"}</button>}
                             </div>
                           </div>
+                          {error && (
+                            <div role="alert" className="mt-3 rounded-xl border border-red-400/25 bg-red-400/10 px-4 py-3 text-sm text-red-200">
+                              {error}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -716,7 +765,7 @@ export default function VoiceStudioPage() {
                 </div>
               </div>
             )}
-            {error && (
+            {error && !(stage === "qc" && audioUrl && qc) && (
               <div
                 role="alert"
                 className="mt-5 rounded-xl border border-red-400/25 bg-red-400/10 px-4 py-3 text-sm text-red-200"
